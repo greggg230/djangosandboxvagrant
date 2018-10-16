@@ -1,0 +1,216 @@
+---
+- hosts: all
+  become: yes
+  vars:
+    database_username: djangosandbox
+    database_password: djangosandbox
+    database_name: djangosandbox
+    username: sandboxuser
+    dependencies:
+      - python-virtualenv
+      - postgresql
+      - postgresql-devel
+      - postgresql-server
+      - python-pip
+      - python-devel
+      - supervisor
+      - git-core
+      - gcc
+      - policycoreutils-python
+      - nano
+      - nginx
+      - urw-fonts
+    git_url: https://github.com/greggg230/djangosandbox.git
+    virtualenv_base: /webapps
+    virtualenv_path: /webapps/djangosandbox
+    nginx_listen_port: 8318
+    nginx_server_name: _
+    project_name: djangosandbox
+    settings_path: djangosandbox/conf/generic
+    local_settings_path: djangosandbox/conf/local
+    supervisor_conf_items:
+      - name: gunicorn
+        template: templates/supervisor/gunicorn.conf
+      - name: runserver
+        template: templates/supervisor/runserver.conf
+    service_path: /etc/systemd/system
+    include_ssl_certs: false
+    ssh_public_key: ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC/gPbEC9o1XIj0lFDywT7YAx55fxTUZUx9+Ftce5Z2pT51WcvMTnQml44blghUCNq+hLqmonbR81H4QtKdOMDpcwlsMAutOFJQKifAnFkoArg+iFoyYeAxx87+Tw5lhXtiJELriyCVZgQRv3BC1Fv1mcQ/1+/zTix+iN96SpkQLBGj9oTtUAyqKEMUPN70SEHxrEVGPDx+W9vtiFY/lCAcncJa+iNGJYaM9xNrjSj5QeOTdTUS4clTU14/Oh3XU9La/0k4TGRxNutse5ic6R5F11/4fklk/GOereRBIiF0xXpAEsag79PAYw6zl0eCKXWOSRsoNZFud3lF/L9+Dkfb 
+  tasks:
+    - name: system setup
+      become_user: root
+      block:
+        - name: Create group
+          group:
+            name: "{{ username }}"
+            gid: 1001
+        - name: Create user
+          user:
+            name: "{{ username }}"
+            uid: 10001
+            group: "{{ username }}"
+        - name: Copy SSH key
+          authorized_key:
+            user: "{{ username }}"
+            state: present
+            key: "{{ ssh_public_key }}"
+        - name: update yum
+          yum: name=* state=latest update_cache=yes
+        - name: update yum and install deps
+          yum:
+            name: "{{ item }}"
+            state: latest
+          loop: "{{ dependencies }}"
+        - file:
+            path: "{{ virtualenv_base }}"
+            state: directory
+            owner: "{{ username }}"
+            group: "{{ username }}"
+            recurse: yes
+        - name: Allow our web port
+          seport:
+            ports: "{{ nginx_listen_port }}"
+            proto: tcp
+            setype: http_port_t
+            state: present
+        - pip:
+            name: psycopg2
+    - name: DB setup
+      block:
+        - name: Set up postgres db
+          become_user: postgres
+          command: postgresql-setup initdb
+        - name: Start postgres
+          service:
+            name: postgresql
+            state: started
+        - name: Configure postgres
+          become_user: postgres
+          block:
+            - name: Create postgres user
+              postgresql_user:
+                name: "{{ database_username }}"
+                password: "{{ database_password }}"
+                role_attr_flags: "SUPERUSER"
+            - name: Create postgres db
+              postgresql_db:
+                name: "{{ database_name }}"
+                owner: "{{ database_username }}"
+            - name: Add pg_hba.conf entry
+              copy:
+                dest: /var/lib/pgsql/data/pg_hba.conf
+                content: host   all   all  all  md5
+                mode: 0600
+                owner: postgres
+        - name: Restart postgres
+          become_user: root
+          service:
+            name: postgresql
+            state: restarted
+            enabled: yes
+    - name: project setup
+      become_user: "{{ username }}"
+      block:
+        - stat:
+            path: "{{ virtualenv_path }}"
+          register: ve
+        - name: create virtualenv
+          command: "virtualenv {{ virtualenv_path }}"
+          when: not ve.stat.exists
+        - name: create directories
+          file:
+            path: "{{ item }}"
+            state: directory
+            owner: "{{ username }}"
+          loop:
+            - "{{ virtualenv_path }}/etc/supervisor/conf.d"
+            - "{{ virtualenv_path }}/var/log/nginx"
+            - "{{ virtualenv_path }}/var/log/supervisor"
+            - "{{ virtualenv_path }}/var/run"
+            - "{{ virtualenv_path }}/var/static"
+            - "{{ virtualenv_path }}/src"
+        - git:
+            repo: "{{ git_url }}"
+            dest: "{{ virtualenv_path }}/src/{{ project_name }}"
+            force: yes
+          loop:
+            - src: "{{ virtualenv_path }}/src/{{ project_name }}/{{ settings_path }}/settings.py"
+              dest: "{{ virtualenv_path }}/src/{{ project_name }}/{{ local_settings_path }}/settings.py"
+            - src: "{{ virtualenv_path }}/src/{{ project_name }}/{{ settings_path }}/__init__.py"
+              dest: "{{ virtualenv_path }}/src/{{ project_name }}/{{ local_settings_path }}/__init__.py"
+        - name: create supervisor configs
+          block:
+            - template:
+                src: templates/supervisord.conf
+                dest: "{{ virtualenv_path }}/etc/supervisor/supervisord.conf"
+            - template:
+                src: "{{ item.template }}"
+                dest: "{{ virtualenv_path }}/etc/supervisor/conf.d/{{ item.name }}.conf"
+              loop: "{{ supervisor_conf_items }}"
+        - pip:
+            name: setuptools
+            extra_args: --upgrade
+            virtualenv: "{{ virtualenv_path }}"
+        - name: install pip requirements
+          pip:
+            requirements: "{{ virtualenv_path }}/src/{{ project_name }}/requirements.pip"
+            extra_args: --upgrade
+            virtualenv: "{{ virtualenv_path }}"
+        - name: create links
+          template:
+            src: "templates/manage.py"
+            dest: "{{ virtualenv_path }}/bin/manage.py"
+            mode: "+x"
+        - name: create supervisor service
+          become_user: root
+          block:
+            - template:
+                src: templates/services/supervisor.service
+                dest: "{{ service_path }}/supervisord.service"
+                mode: 0644
+            - systemd:
+                name: supervisord
+                enabled: yes
+                state: started
+        - name: Kill supervisor
+          command: supervisorctl shutdown
+          become_user: root
+    - name: create gunicorn conf
+      become_user: "{{ username }}"
+      template:
+        src: templates/gunicorn.conf.py
+        dest: "{{ virtualenv_path }}/etc/gunicorn.conf.py"
+    - name: create nginx conf
+      become_user: root
+      template:
+        src: templates/nginx.conf
+        dest: "/etc/nginx/nginx.conf"
+        owner: root
+        group: root
+    - name: change nginx dir permissions
+      file:
+        path: /var/lib/nginx
+        state: directory
+        owner: "{{ username }}"
+        group: "{{ username }}"
+    - name: Change permissive setting on selinux
+      selinux:
+        policy: targeted
+        state: permissive
+    - name: enable and restart nginx
+      systemd:
+        state: restarted
+        enabled: yes
+        name: nginx
+    - name: syncdb
+      command: "{{ virtualenv_path }}/bin/python {{ virtualenv_path }}/bin/manage.py migrate"
+    - name: collect static
+      command: "{{ virtualenv_path }}/bin/python {{ virtualenv_path }}/bin/manage.py collectstatic --noinput"
+    - name: copy setup script
+      template:
+        src: setup/setup.py
+        dest: "/home/{{ username }}/setup.py"
+        owner: "{{ username }}"
+        group: "{{ username }}"
+    - name: run myghr setup
+      command: "{{ virtualenv_path }}/bin/python /home/{{ username }}/setup.py"

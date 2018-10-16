@@ -1,0 +1,14 @@
+[Unit]
+Description=supervisord - Supervisor process control system for UNIX
+Documentation=http://supervisord.org
+After=network.target
+
+[Service]
+Type=forking
+ExecStart={{ virtualenv_path }}/bin/python {{ virtualenv_path }}/bin/supervisord -c {{ virtualenv_path }}/etc/supervisor/supervisord.conf
+ExecReload={{ virtualenv_path }}/bin/python {{ virtualenv_path }}/bin/supervisorctl -c {{ virtualenv_path }}/etc/supervisor/supervisord.conf reload
+ExecStop={{ virtualenv_path }}/bin/python {{ virtualenv_path }}/bin/supervisorctl -c {{ virtualenv_path }}/etc/supervisor/supervisord.conf shutdown
+User=root
+
+[Install]
+WantedBy=multi-user.target
